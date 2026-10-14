@@ -31,7 +31,7 @@ import java.net.URLEncoder
 class AntigravityOAuthManager(
     context: Context,
     instanceId: String,
-    private val clientId: String = CLIENT_ID,
+    private val configuredClientId: String = CLIENT_ID,
     private val tokenEndpoint: String = AntigravityOAuthProtocol.TOKEN_ENDPOINT,
     private val httpCall: (Request) -> Pair<Int, String> = { request -> defaultHttp(request) },
     private val clock: () -> Long = System::currentTimeMillis,
@@ -62,7 +62,7 @@ class AntigravityOAuthManager(
 
     override val authURL: String = AntigravityOAuthProtocol.AUTH_ENDPOINT
     override val tokenURL: String = tokenEndpoint
-    override val clientId: String get() = this@AntigravityOAuthManager.clientId
+    override val clientId: String get() = configuredClientId
 
     /** Public client: there is no secret. */
     override val clientSecret: String? = null
