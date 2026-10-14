@@ -13,10 +13,7 @@ permissions:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    defaults:
-      run:
-        working-directory: src/android
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -27,10 +24,42 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Set up Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          gomobile init
+
+      - name: Install Android NDK r28
+        run: |
+          set -euo pipefail
+          ndk_root="$ANDROID_HOME/ndk"
+          mkdir -p "$ndk_root"
+          curl -fsSL -o /tmp/ndk.zip https://dl.google.com/android/repository/android-ndk-r28-linux.zip
+          unzip -q /tmp/ndk.zip -d "$ndk_root"
+          mv "$ndk_root/android-ndk-r28" "$ndk_root/28.0.0"
+          echo "ANDROID_NDK_HOME=$ndk_root/28.0.0" >> "$GITHUB_ENV"
+
+      - name: Build rclone.aar with the repository script
+        run: |
+          set -euo pipefail
+          git submodule status || true
+          ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/rclone.aar
+
       - name: Make gradlew executable
+        working-directory: src/android
         run: chmod +x gradlew
 
       - name: Compile and run Antigravity unit tests
+        working-directory: src/android
         run: |
           set +e
           ./gradlew :app:testDebugUnitTest --tests "com.openminis.app.provider.antigravity.*" --no-daemon --stacktrace > gradle-antigravity.log 2>&1
@@ -40,6 +69,7 @@ jobs:
 
       - name: Surface compiler and test errors as annotations
         if: failure()
+        working-directory: src/android
         run: |
           grep -E '^e: |FAILED|AssertionError|Exception' gradle-antigravity.log | head -n 60 | while IFS= read -r line; do
             safe=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r/%0D/g')
