@@ -195,7 +195,7 @@ class GeminiProvider(
         awaitClose()
     }
 
-    private fun buildRequestBody(
+    internal fun buildRequestBody(
         messages: List<LLMMessage>,
         systemPrompt: String?,
         maxTokens: Int,

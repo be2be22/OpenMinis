@@ -1,161 +1,209 @@
 package com.openminis.app.auth
 
 import android.content.Context
-import android.net.Uri
 import android.util.Log
+import com.openminis.app.provider.antigravity.AntigravityOAuthProtocol
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import java.net.URLEncoder
 
 /**
- * Antigravity OAuth manager — mirrors iOS `AntigravityOAuthManager`.
+ * Antigravity sign-in manager.
  *
- * Antigravity is Google's experimental "Cloud Code Assist" proxy that routes
- * Claude / Gemini / GPT models through a Gemini-format request envelope. It
- * reuses Google's OAuth endpoints but with its own client_id + client_secret
- * and two extra scopes (`cclog`, `experimentsandconfigs`), and runs a local
- * HTTP callback on port 8086 (distinct from Gemini's 8085 so the two can
- * coexist).
+ * Google OAuth authorization code flow with PKCE for a public client. No client
+ * secret is stored or sent. [clientId] is empty until a Google OAuth client is
+ * registered for the OpenMinis Android package. Until then [isConfigured] is
+ * false and sign-in refuses to start with a clear message.
  *
- * **Scaffolding only** — this file captures the OAuth constants and project
- * discovery flow so the provider layer can consume them. Actual request
- * dispatch (the `AntigravityProvider` + `AntigravityAgentProvider` pair from
- * iOS) is not wired yet; when it lands it will reuse
- * [activeBaseURL] + [gcpProjectId] persisted here.
+ * Tokens live in the same encrypted store as the other OAuth managers. Concurrent
+ * callers share one refresh through [refreshLock], so a refresh token is never
+ * spent twice.
+ *
+ * The iOS manager and the earlier scaffold used a placeholder secret and a
+ * client id that belongs to another product. Both are removed here.
  */
-class AntigravityOAuthManager(context: Context, instanceId: String) : OAuthManager(context, instanceId) {
+class AntigravityOAuthManager(
+    context: Context,
+    instanceId: String,
+    private val clientId: String = CLIENT_ID,
+    private val tokenEndpoint: String = AntigravityOAuthProtocol.TOKEN_ENDPOINT,
+    private val httpCall: (Request) -> Pair<Int, String> = { request -> defaultHttp(request) },
+    private val clock: () -> Long = System::currentTimeMillis,
+) : OAuthManager(context, instanceId) {
+
     companion object {
         private const val TAG = "AntigravityOAuth"
-        private const val USER_AGENT = "antigravity/1.107.0 android/aarch64"
+        private const val KEY_EMAIL = "email"
+        private const val KEY_PROJECT = "gcp_project"
+        private const val KEY_BASE_URL = "base_url"
 
         /**
-         * Candidate Cloud Code Assist base URLs, probed in order on login.
-         * `daily-cloudcode-pa` is the preview / daily release channel; the
-         * public `cloudcode-pa` is the fallback. Matches iOS
-         * `AntigravityOAuthManager.cloudCodeBaseURLs`.
+         * Google OAuth client id registered for OpenMinis on Android. Empty until
+         * such a client exists. Do not paste an id from another product here.
          */
-        val cloudCodeBaseURLs = listOf(
-            "https://daily-cloudcode-pa.sandbox.googleapis.com",
-            "https://cloudcode-pa.googleapis.com",
-        )
+        const val CLIENT_ID: String = ""
+
+        private val refreshLock = Mutex()
+
+        private fun defaultHttp(request: Request): Pair<Int, String> =
+            httpClient.newCall(request).execute().use { res ->
+                res.code to res.body?.string().orEmpty()
+            }
     }
 
-    override val authURL = "https://accounts.google.com/o/oauth2/v2/auth"
-    override val tokenURL = "https://oauth2.googleapis.com/token"
-    override val clientId = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-    // Placeholder. Google OAuth requires a client secret alongside the
-    // client id; supply your own from Google Cloud Console to use this
-    // sign-in. API-key providers are unaffected.
-    override val clientSecret = "GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    override val callbackPort = 8086
-    override val redirectPath = "/oauth2callback"
-    override val scopes = listOf(
-        "https://www.googleapis.com/auth/cloud-platform",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/cclog",
-        "https://www.googleapis.com/auth/experimentsandconfigs",
-    ).joinToString(" ")
+    /** True when a client id is configured for this build. */
+    val isConfigured: Boolean get() = clientId.isNotBlank()
 
-    override fun buildAuthorizationUrl(): String {
-        val (_, challenge) = generateHexPKCE()
-        val state = generateState()
-        return "$authURL?" + listOf(
-            "client_id=$clientId",
-            "redirect_uri=${Uri.encode(redirectUri)}",
-            "response_type=code",
-            "scope=${Uri.encode(scopes)}",
-            "state=$state",
-            "code_challenge=$challenge",
-            "code_challenge_method=S256",
-            "access_type=offline",
-            "prompt=consent",
-        ).joinToString("&")
-    }
+    override val authURL: String = AntigravityOAuthProtocol.AUTH_ENDPOINT
+    override val tokenURL: String = tokenEndpoint
+    override val clientId: String get() = this@AntigravityOAuthManager.clientId
 
-    /** Cached user email from Google userinfo. */
+    /** Public client: there is no secret. */
+    override val clientSecret: String? = null
+    override val callbackPort: Int = 8086
+    override val redirectPath: String = "/oauth2callback"
+    override val scopes: String = AntigravityOAuthProtocol.SCOPES.joinToString(" ")
+
+    /** Google account email, cached for display. */
     var email: String?
-        get() = loadOAuthString("email")
-        private set(value) { value?.let { saveOAuthString("email", it) } }
+        get() = loadOAuthString(KEY_EMAIL)
+        private set(value) { value?.let { saveOAuthString(KEY_EMAIL, it) } }
 
-    /** GCP project ID discovered via Cloud Code Assist loadCodeAssist. */
+    /** Cloud project id discovered at sign-in. */
     var gcpProjectId: String?
-        get() = loadOAuthString("gcp_project")
-        private set(value) { value?.let { saveOAuthString("gcp_project", it) } }
+        get() = loadOAuthString(KEY_PROJECT)
+        set(value) { value?.let { saveOAuthString(KEY_PROJECT, it) } }
 
-    /**
-     * Cloud Code Assist base URL that successfully returned the project on
-     * login. Subsequent requests pin to this URL so the provider doesn't
-     * re-probe the daily/fallback pair on every call.
-     */
+    /** Base URL that answered the project discovery. */
     var activeBaseURL: String?
-        get() = loadOAuthString("base_url")
-        private set(value) { value?.let { saveOAuthString("base_url", it) } }
+        get() = loadOAuthString(KEY_BASE_URL)
+        set(value) { value?.let { saveOAuthString(KEY_BASE_URL, it) } }
 
-    override suspend fun onTokensReceived(json: JSONObject) {
-        fetchUserEmail()
-        discoverProjectIfNeeded()
-    }
-
-    private suspend fun fetchUserEmail() = withContext(Dispatchers.IO) {
-        val token = validAccessToken() ?: return@withContext
-        try {
-            val conn = URL("https://www.googleapis.com/oauth2/v1/userinfo").openConnection() as HttpURLConnection
-            conn.setRequestProperty("Authorization", "Bearer $token")
-            if (conn.responseCode == 200) {
-                val body = conn.inputStream.bufferedReader().readText()
-                email = JSONObject(body).optString("email")
-            }
-            conn.disconnect()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to fetch email", e)
+    /** Throws when sign-in cannot start because no client id is configured. */
+    fun requireConfigured() {
+        check(isConfigured) {
+            "Antigravity sign-in is not configured for this build. " +
+                "A Google OAuth client for OpenMinis is required."
         }
     }
 
     /**
-     * Probe each candidate Cloud Code Assist base URL in [cloudCodeBaseURLs]
-     * until one returns a project ID. Persists the winning URL in
-     * [activeBaseURL] so the provider avoids re-probing.
+     * Store a token response. Google omits the refresh token on a refresh, so the
+     * previous one is kept.
      */
-    suspend fun discoverProjectIfNeeded(): Boolean = withContext(Dispatchers.IO) {
-        if (!gcpProjectId.isNullOrEmpty() && !activeBaseURL.isNullOrEmpty()) return@withContext true
-        val token = validAccessToken() ?: return@withContext false
-
-        for (baseURL in cloudCodeBaseURLs) {
-            val projectId = loadCodeAssist(token, baseURL)
-            if (!projectId.isNullOrEmpty()) {
-                gcpProjectId = projectId
-                activeBaseURL = baseURL
-                Log.i(TAG, "Antigravity project discovered via $baseURL")
-                return@withContext true
-            }
-        }
-        Log.w(TAG, "Antigravity project discovery failed on all base URLs")
-        false
+    fun storeTokenResponse(json: JSONObject) {
+        val previous = loadStoredTokens()?.optString("refresh_token")?.ifEmpty { null }
+        val tokens = AntigravityOAuthProtocol.parseTokenResponse(json, clock(), previous)
+        val blob = JSONObject()
+            .put("access_token", tokens.accessToken)
+            .put("expire_at", tokens.expiresAtMillis)
+        tokens.refreshToken?.let { blob.put("refresh_token", it) }
+        saveOAuthString("tokens", blob.toString())
     }
 
-    private fun loadCodeAssist(token: String, baseURL: String): String? {
-        return try {
-            val req = Request.Builder()
-                .url("$baseURL/v1internal:loadCodeAssist")
-                .post("{}".toRequestBody("application/json".toMediaType()))
-                .header("Authorization", "Bearer $token")
-                .header("User-Agent", USER_AGENT)
-                .header("X-Client-Name", "antigravity")
-                .header("X-Client-Version", "1.107.0")
-                .build()
-            val response = httpClient.newCall(req).execute()
-            val body = if (response.isSuccessful) response.body?.string() else null
-            response.close()
-            body?.let { JSONObject(it).optString("gcpProjectId").ifEmpty { null } }
-        } catch (e: Exception) {
-            Log.d(TAG, "loadCodeAssist failed on $baseURL: ${e.message}")
-            null
+    /**
+     * A usable access token, refreshed when close to expiry. Returns null when the
+     * user must sign in again. A transient failure returns null but keeps the
+     * stored tokens, so the next call can try again.
+     */
+    override suspend fun validAccessToken(): String? {
+        loadManualBearerToken()?.takeIf { it.isNotEmpty() }?.let { return it }
+        val stored = loadStoredTokens() ?: return null
+        val accessToken = stored.optString("access_token").ifEmpty { return null }
+        val tokens = AntigravityOAuthProtocol.Tokens(
+            accessToken = accessToken,
+            refreshToken = stored.optString("refresh_token").ifEmpty { null },
+            expiresAtMillis = stored.optLong("expire_at", 0L),
+        )
+        if (!AntigravityOAuthProtocol.isExpired(tokens, clock())) return accessToken
+        return refreshLocked(tokens.refreshToken)
+    }
+
+    /** Refreshes the access token. Concurrent callers share one refresh. */
+    override suspend fun refreshToken(): Boolean {
+        val refresh = loadStoredTokens()?.optString("refresh_token")?.ifEmpty { null }
+        return refreshLocked(refresh) != null
+    }
+
+    private suspend fun refreshLocked(refreshToken: String?): String? = refreshLock.withLock {
+        // Another caller may have refreshed while this one waited for the lock.
+        val current = loadStoredTokens()
+        val currentToken = current?.optString("access_token").orEmpty()
+        val currentExpiry = current?.optLong("expire_at", 0L) ?: 0L
+        if (currentToken.isNotEmpty() && !AntigravityOAuthProtocol.isExpired(
+                AntigravityOAuthProtocol.Tokens(currentToken, null, currentExpiry), clock(),
+            )
+        ) {
+            return@withLock currentToken
         }
+        if (refreshToken.isNullOrEmpty()) return@withLock null
+
+        val (status, body) = withContext(Dispatchers.IO) {
+            httpCall(formRequest(tokenEndpoint, AntigravityOAuthProtocol.refreshForm(clientId, refreshToken)))
+        }
+        if (status !in 200..299) {
+            when (val error = AntigravityOAuthProtocol.classifyTokenError(status, body)) {
+                is AntigravityOAuthProtocol.TokenError.ReauthRequired -> {
+                    markNeedsReauth(refreshToken)
+                    Log.w(TAG, "Antigravity refresh rejected; sign-in required")
+                }
+                is AntigravityOAuthProtocol.TokenError.Transient ->
+                    Log.w(TAG, "Antigravity refresh failed temporarily (status ${error.status})")
+            }
+            return@withLock null
+        }
+        val json = try {
+            JSONObject(body)
+        } catch (_: Exception) {
+            return@withLock null
+        }
+        storeTokenResponse(json)
+        loadStoredTokens()?.optString("access_token")?.ifEmpty { null }
+    }
+
+    /**
+     * Signs out: removes the tokens (via the base [logout]) and also clears the
+     * cached account, project and base URL, so no account state survives.
+     */
+    fun signOut() {
+        logout()
+        clearAccountState()
+    }
+
+    private fun clearAccountState() {
+        for (key in listOf(KEY_EMAIL, KEY_PROJECT, KEY_BASE_URL)) {
+            com.openminis.app.util.EncryptedPrefsFactory.safeCreate(context, "oauth_prefs")
+                .edit()
+                .remove("oauth_${key}_$instanceId")
+                .apply()
+        }
+    }
+
+    private fun formRequest(url: String, form: Map<String, String>): Request {
+        val body = form.entries.joinToString("&") { (k, v) ->
+            URLEncoder.encode(k, "UTF-8") + "=" + URLEncoder.encode(v, "UTF-8")
+        }
+        return Request.Builder()
+            .url(url)
+            .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+            .build()
+    }
+
+    /** Authorization URL for the sign-in screen. Requires [isConfigured]. */
+    override fun buildAuthorizationUrl(): String {
+        requireConfigured()
+        val verifier = generateAndSavePKCE().first
+        return AntigravityOAuthProtocol.buildAuthorizationUrl(
+            clientId = clientId,
+            redirectUri = redirectUri,
+            state = generateAndSaveState(),
+            codeChallenge = AntigravityOAuthProtocol.codeChallenge(verifier),
+        )
     }
 }
