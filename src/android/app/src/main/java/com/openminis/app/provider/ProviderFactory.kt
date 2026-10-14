@@ -257,7 +257,22 @@ object ProviderFactory {
             // build) whose provider Android cannot speak. Fail with a clear
             // credential error rather than constructing a provider that would
             // emit malformed requests. iOS throws FactoryError here likewise.
-            ProviderType.antigravity, ProviderType.unsupported -> {
+            ProviderType.antigravity -> {
+                if (context == null) throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                val oauthManager = com.openminis.app.auth.AntigravityOAuthManager(context, instance.id)
+                com.openminis.app.provider.antigravity.AntigravityProvider(
+                    tokenProvider = {
+                        oauthManager.validAccessToken()
+                            ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                    },
+                    projectProvider = { oauthManager.gcpProjectId },
+                    baseURL = oauthManager.activeBaseURL
+                        ?: com.openminis.app.provider.antigravity.AntigravityProtocol.BASE_URLS[0],
+                    model = model,
+                    sessionId = sessionId ?: java.util.UUID.randomUUID().toString(),
+                )
+            }
+            ProviderType.unsupported -> {
                 throw com.openminis.app.data.model.LLMError.InvalidApiKey()
             }
         }

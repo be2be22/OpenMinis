@@ -48,6 +48,9 @@ class AntigravityProvider(
 
     override val name = "Antigravity"
 
+    /** One Gemini body builder for the provider lifetime; its model is synced per call. */
+    private val innerBuilder = GeminiProvider(apiKey = "", model = model)
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.MINUTES)
@@ -126,8 +129,8 @@ class AntigravityProvider(
             ?: throw LLMError.ProviderError(
                 "Antigravity project is not set up yet. Sign in again to load your project.",
             )
-        // Built per call so a model switch is reflected in the inner body.
-        val inner = GeminiProvider(apiKey = "", model = model).buildRequestBody(
+        innerBuilder.model = model
+        val inner = innerBuilder.buildRequestBody(
             messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
         )
         return AntigravityProtocol.wrapEnvelope(

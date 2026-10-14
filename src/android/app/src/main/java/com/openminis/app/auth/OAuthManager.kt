@@ -133,6 +133,8 @@ abstract class OAuthManager(
                 // token it hands out is Copilot's short-lived session token.
                 com.openminis.app.data.model.ProviderType.githubCopilot ->
                     CopilotOAuthManager(context, instance.id)
+                com.openminis.app.data.model.ProviderType.antigravity ->
+                    AntigravityOAuthManager(context, instance.id)
                 else -> null
             }
         }
