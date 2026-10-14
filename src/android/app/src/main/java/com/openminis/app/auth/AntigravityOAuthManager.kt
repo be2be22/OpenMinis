@@ -1,8 +1,12 @@
 package com.openminis.app.auth
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
+import com.openminis.app.BuildConfig
 import com.openminis.app.provider.antigravity.AntigravityOAuthProtocol
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -14,24 +18,24 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 /**
- * Antigravity sign-in manager.
+ * Antigravity sign-in manager for Android.
  *
- * Google OAuth authorization code flow with PKCE for a public client. No client
- * secret is stored or sent. [clientId] is empty until a Google OAuth client is
- * registered for the OpenMinis Android package. Until then [isConfigured] is
- * false and sign-in refuses to start with a clear message.
+ * Flow: Google OAuth authorization code with PKCE and a `state` check, for an
+ * Android OAuth client. Google's Android client type has no client secret and
+ * uses a redirect of the form `com.googleusercontent.apps.<client-id>:/oauth2redirect`.
+ * The system browser sends the user back to the app, and [AntigravityRedirectActivity]
+ * hands the URI to [complete]. No localhost listener is used, since a phone cannot
+ * receive a localhost callback from the browser.
  *
- * Tokens live in the same encrypted store as the other OAuth managers. Concurrent
- * callers share one refresh through [refreshLock], so a refresh token is never
- * spent twice.
- *
- * The iOS manager and the earlier scaffold used a placeholder secret and a
- * client id that belongs to another product. Both are removed here.
+ * The client id comes from the build-time setting ANTIGRAVITY_OAUTH_CLIENT_ID in
+ * provider-customization.properties. It is empty in the public mirror. In that case
+ * [isConfigured] is false and [login] fails with a setup message before any browser
+ * opens. No secret and no other product's client id is used.
  */
 class AntigravityOAuthManager(
     context: Context,
     instanceId: String,
-    private val configuredClientId: String = CLIENT_ID,
+    private val configuredClientId: String = BuildConfig.ANTIGRAVITY_OAUTH_CLIENT_ID,
     private val tokenEndpoint: String = AntigravityOAuthProtocol.TOKEN_ENDPOINT,
     private val httpCall: (Request) -> Pair<Int, String> = { request -> defaultHttp(request) },
     private val clock: () -> Long = System::currentTimeMillis,
@@ -42,33 +46,62 @@ class AntigravityOAuthManager(
         private const val KEY_EMAIL = "email"
         private const val KEY_PROJECT = "gcp_project"
         private const val KEY_BASE_URL = "base_url"
-
-        /**
-         * Google OAuth client id registered for OpenMinis on Android. Empty until
-         * such a client exists. Do not paste an id from another product here.
-         */
-        const val CLIENT_ID: String = ""
+        private const val KEY_PENDING_STATE = "pending_state"
+        private const val KEY_PENDING_VERIFIER = "pending_verifier"
 
         private val refreshLock = Mutex()
+
+        /** Set by [AntigravityRedirectActivity] when the browser returns. */
+        @Volatile
+        private var pendingCallback: CompletableDeferred<Uri>? = null
+
+        /** Delivers the redirect URI to the waiting [login] call. Returns false if nothing waits. */
+        fun deliverRedirect(uri: Uri): Boolean {
+            val waiter = pendingCallback ?: return false
+            return waiter.complete(uri)
+        }
+
+        /** Android redirect scheme for a client id: the reversed-looking Google form. */
+        fun redirectScheme(clientId: String): String = "com.googleusercontent.apps." + clientId.removeSuffix(".apps.googleusercontent.com")
+
+        /** The redirect URI registered for the Android client. */
+        fun androidRedirectUri(clientId: String): String = redirectScheme(clientId) + ":/oauth2redirect"
 
         private fun defaultHttp(request: Request): Pair<Int, String> =
             OAuthManager.httpClient.newCall(request).execute().use { res ->
                 res.code to res.body?.string().orEmpty()
             }
+
+        /**
+         * Start sign-in for [instanceId]: opens the browser, waits for the redirect,
+         * exchanges the code, and stores the tokens. Returns a masked-safe status string.
+         */
+        suspend fun login(
+            context: Context,
+            instanceId: String,
+            providerRepository: com.openminis.app.data.repository.ProviderRepository,
+        ): String {
+            val manager = AntigravityOAuthManager(context, instanceId)
+            manager.requireConfigured()
+            return manager.performLogin(context)
+        }
     }
 
     /** True when a client id is configured for this build. */
-    val isConfigured: Boolean get() = clientId.isNotBlank()
+    val isConfigured: Boolean get() = configuredClientId.isNotBlank()
 
     override val authURL: String = AntigravityOAuthProtocol.AUTH_ENDPOINT
     override val tokenURL: String = tokenEndpoint
     override val clientId: String get() = configuredClientId
 
-    /** Public client: there is no secret. */
+    /** Android public client: there is no secret. */
     override val clientSecret: String? = null
-    override val callbackPort: Int = 8086
-    override val redirectPath: String = "/oauth2callback"
+    override val callbackPort: Int = 0
+    override val redirectPath: String = "/oauth2redirect"
     override val scopes: String = AntigravityOAuthProtocol.SCOPES.joinToString(" ")
+
+    /** The Android redirect URI, built from the client id. Not a localhost URL. */
+    override val redirectUri: String get() = androidRedirectUri(configuredClientId)
 
     /** Google account email, cached for display. */
     var email: String?
@@ -85,12 +118,84 @@ class AntigravityOAuthManager(
         get() = loadOAuthString(KEY_BASE_URL)
         set(value) { value?.let { saveOAuthString(KEY_BASE_URL, it) } }
 
-    /** Throws when sign-in cannot start because no client id is configured. */
+    /** Throws with a user-facing setup message when no client id is configured. */
     fun requireConfigured() {
         check(isConfigured) {
-            "Antigravity sign-in is not configured for this build. " +
-                "A Google OAuth client for OpenMinis is required."
+            "Antigravity sign-in needs a Google OAuth client for this build. " +
+                "Set ANTIGRAVITY_OAUTH_CLIENT_ID in app/provider-customization.properties " +
+                "to an Android client for com.openminis.app, then rebuild."
         }
+    }
+
+    /**
+     * Opens the browser with the authorization URL and waits for the redirect.
+     * A 5-minute timeout keeps the sign-in screen from waiting forever.
+     */
+    suspend fun performLogin(context: Context): String {
+        val verifier = generateAndSavePKCE().first
+        val state = generateAndSaveState()
+        saveOAuthString(KEY_PENDING_STATE, state)
+        saveOAuthString(KEY_PENDING_VERIFIER, verifier)
+
+        val url = AntigravityOAuthProtocol.buildAuthorizationUrl(
+            clientId = clientId,
+            redirectUri = redirectUri,
+            state = state,
+            codeChallenge = AntigravityOAuthProtocol.codeChallenge(verifier),
+        )
+        val waiter = CompletableDeferred<Uri>()
+        pendingCallback = waiter
+        try {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            val uri = kotlinx.coroutines.withTimeout(5 * 60 * 1000L) { waiter.await() }
+            complete(uri)
+            return "signed-in"
+        } finally {
+            if (pendingCallback === waiter) pendingCallback = null
+        }
+    }
+
+    /**
+     * Handles the redirect URI: checks the error and state, exchanges the code with
+     * the stored PKCE verifier, and stores the tokens.
+     */
+    suspend fun complete(uri: Uri) {
+        val error = uri.getQueryParameter("error")
+        if (error != null) {
+            throw IllegalStateException("Google sign-in was not completed (${error.take(60)}).")
+        }
+        val expectedState = loadOAuthString(KEY_PENDING_STATE)
+        val receivedState = uri.getQueryParameter("state")
+        if (!AntigravityOAuthProtocol.isStateValid(expectedState, receivedState)) {
+            throw IllegalStateException("Google sign-in response did not match this request. Try again.")
+        }
+        val code = uri.getQueryParameter("code")
+            ?: throw IllegalStateException("Google sign-in returned no authorization code.")
+        val verifier = loadOAuthString(KEY_PENDING_VERIFIER)
+            ?: throw IllegalStateException("Sign-in session expired. Try again.")
+        exchangeCode(code, verifier)
+        saveOAuthString(KEY_PENDING_STATE, "")
+        saveOAuthString(KEY_PENDING_VERIFIER, "")
+    }
+
+    private suspend fun exchangeCode(code: String, verifier: String) {
+        val form = AntigravityOAuthProtocol.authorizationCodeForm(clientId, code, redirectUri, verifier)
+        val (status, body) = withContext(Dispatchers.IO) {
+            httpCall(formRequest(tokenEndpoint, form))
+        }
+        if (status !in 200..299) {
+            // Never log the body: it can echo request material.
+            Log.w(TAG, "Antigravity token exchange failed (status $status)")
+            throw IllegalStateException("Google did not accept the sign-in (status $status). Try again.")
+        }
+        val json = try {
+            JSONObject(body)
+        } catch (_: Exception) {
+            throw IllegalStateException("Google returned an unreadable sign-in response.")
+        }
+        storeTokenResponse(json)
     }
 
     /**
@@ -177,7 +282,7 @@ class AntigravityOAuthManager(
     }
 
     private fun clearAccountState() {
-        for (key in listOf(KEY_EMAIL, KEY_PROJECT, KEY_BASE_URL)) {
+        for (key in listOf(KEY_EMAIL, KEY_PROJECT, KEY_BASE_URL, KEY_PENDING_STATE, KEY_PENDING_VERIFIER)) {
             com.openminis.app.util.EncryptedPrefsFactory.safeCreate(context, "oauth_prefs")
                 .edit()
                 .remove("oauth_${key}_$instanceId")
@@ -199,10 +304,13 @@ class AntigravityOAuthManager(
     override fun buildAuthorizationUrl(): String {
         requireConfigured()
         val verifier = generateAndSavePKCE().first
+        val state = generateAndSaveState()
+        saveOAuthString(KEY_PENDING_STATE, state)
+        saveOAuthString(KEY_PENDING_VERIFIER, verifier)
         return AntigravityOAuthProtocol.buildAuthorizationUrl(
             clientId = clientId,
             redirectUri = redirectUri,
-            state = generateAndSaveState(),
+            state = state,
             codeChallenge = AntigravityOAuthProtocol.codeChallenge(verifier),
         )
     }

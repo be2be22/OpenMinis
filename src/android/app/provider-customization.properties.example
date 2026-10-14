@@ -13,3 +13,9 @@
 # the same endpoint declare the same identifier, e.g.
 # https://github.com/Wei-Shaw/claude-relay-service
 ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=
+
+# Google OAuth client id for Antigravity sign-in on Android. Must be an
+# "Android" type client registered for package com.openminis.app with the SHA-1
+# of the signing key you install with. Leave empty to build; sign-in then shows a
+# setup message instead of starting. No client secret is used or needed.
+ANTIGRAVITY_OAUTH_CLIENT_ID=

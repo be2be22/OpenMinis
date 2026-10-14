@@ -402,6 +402,23 @@
             </intent-filter>
         </activity>
 
+        <!-- Antigravity (Google) sign-in redirect for the Android OAuth client. The scheme
+             is com.googleusercontent.apps.<client-id>, supplied at build time from
+             ANTIGRAVITY_OAUTH_CLIENT_ID. Empty in the public mirror: no scheme matches,
+             so no redirect is received until a client id is configured. -->
+        <activity
+            android:name=".auth.AntigravityRedirectActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="${antigravityRedirectScheme}" android:path="/oauth2redirect" />
+            </intent-filter>
+        </activity>
+
         <!-- OAuth callback handler: captures localhost redirects for all providers -->
         <!-- Prevents "Choose activity" dialog when OAuth provider redirects to localhost -->
         <activity

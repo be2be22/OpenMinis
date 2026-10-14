@@ -47,6 +47,19 @@ android {
         // `release`. Kept separate from BuildConfig.DEBUG so a non-debuggable
         // build can still carry the tooling.
         buildConfigField("boolean", "DEV_TOOLS", "false")
+        buildConfigField(
+            "String",
+            "ANTIGRAVITY_OAUTH_CLIENT_ID",
+            "\"${customizationValue("ANTIGRAVITY_OAUTH_CLIENT_ID")}\""
+        )
+        // Custom scheme for the Android client. With no client id it is a
+        // placeholder that matches no real redirect.
+        val antigravityClientId = customizationValue("ANTIGRAVITY_OAUTH_CLIENT_ID")
+        manifestPlaceholders["antigravityRedirectScheme"] = if (antigravityClientId.isBlank()) {
+            "minis-antigravity-unconfigured"
+        } else {
+            "com.googleusercontent.apps." + antigravityClientId.removeSuffix(".apps.googleusercontent.com")
+        }
 
         // System prompt prefix required by Anthropic for Claude Code OAuth
         // credentials. Empty in the public mirror (see provider-customization.properties).
