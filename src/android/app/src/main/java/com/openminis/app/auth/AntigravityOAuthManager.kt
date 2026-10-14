@@ -52,7 +52,7 @@ class AntigravityOAuthManager(
         private val refreshLock = Mutex()
 
         private fun defaultHttp(request: Request): Pair<Int, String> =
-            httpClient.newCall(request).execute().use { res ->
+            OAuthManager.httpClient.newCall(request).execute().use { res ->
                 res.code to res.body?.string().orEmpty()
             }
     }

@@ -2765,7 +2765,25 @@ class ProviderRepository(private val context: Context) {
                     // [T-android-provider-type-parity] No models endpoint to
                     // query for a type this build cannot drive; the instance
                     // keeps whatever entries the restore brought with it.
-                    ProviderType.antigravity, ProviderType.unsupported -> emptyList()
+                    ProviderType.antigravity -> run {
+                        // Real catalog from the Cloud Code endpoint. The OAuth token is
+                        // refreshed here when needed; no fallback list is invented.
+                        val oauth = if (context == null) null
+                            else com.openminis.app.auth.AntigravityOAuthManager(context, instance.id)
+                        val token = oauth?.validAccessToken()
+                        var found: List<LLMModel> = emptyList()
+                        if (oauth != null && !token.isNullOrEmpty()) {
+                            val bases = oauth.activeBaseURL?.let { listOf(it) }
+                                ?: com.openminis.app.provider.antigravity.AntigravityProtocol.BASE_URLS
+                            for (base in bases) {
+                                found = com.openminis.app.provider.antigravity.AntigravityModelsApi
+                                    .fetchModels(token, base, context)
+                                if (found.isNotEmpty()) break
+                            }
+                        }
+                        found
+                    }
+                    ProviderType.unsupported -> emptyList()
                 }
             } catch (e: Exception) {
                 // Rethrow only if THIS coroutine was cancelled (the onboarding
