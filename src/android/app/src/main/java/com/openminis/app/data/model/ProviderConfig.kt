@@ -88,7 +88,8 @@ enum class ProviderType(val displayName: String) {
             // with the Responses endpoint forced on.
             anthropic, gemini, openAI, openRouter, xAI, kimiCode, openAIResponses,
             githubCopilot -> true
-            antigravity, unsupported -> false
+            antigravity -> true
+            unsupported -> false
         }
 
     val builtInModels: List<LLMModel>

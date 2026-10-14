@@ -183,6 +183,7 @@ private val providerDisplayOrder = listOf(
     ProviderType.openAI,
     ProviderType.anthropic,
     ProviderType.gemini,
+    ProviderType.antigravity,
     ProviderType.xAI,
     ProviderType.kimiCode,
     ProviderType.openRouter,
@@ -210,7 +211,7 @@ private fun providerIcon(type: ProviderType): Pair<ImageVector, Color> = when (t
     // package / newer build; never offered in addableProviderTypes, but the
     // icon helper is also used to render an already-restored instance.
     ProviderType.openAIResponses -> Icons.Default.Hub to Color(0xFF4CAF50)
-    ProviderType.antigravity,
+    ProviderType.antigravity -> Icons.Default.Cloud to Color(0xFF7E57C2)
     ProviderType.unsupported -> Icons.Default.Cloud to Color(0xFF9E9E9E)
 }
 
@@ -238,7 +239,7 @@ private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
         ProviderType.openAIResponses -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
         // Undrivable types: an API key is the only thing worth showing, and the
         // screen never offers them for creation anyway.
-        ProviderType.antigravity,
+        ProviderType.antigravity -> listOf(ProviderCredential.oauth)
         ProviderType.unsupported -> listOf(ProviderCredential.apiKey)
     }
 }
@@ -289,7 +290,7 @@ private fun ChooseProviderScreen(
                     // [T-android-provider-type-parity] Fall back to the enum's
                     // own display name for types this screen doesn't curate.
                     ProviderType.openAIResponses,
-                    ProviderType.antigravity,
+                    ProviderType.antigravity -> "Antigravity"
                     ProviderType.unsupported -> type.displayName
                 }
                 // Describe which vendors each protocol supports, rather than a
@@ -306,7 +307,7 @@ private fun ChooseProviderScreen(
                     // creation; reuse the OpenAI copy for the Responses API and
                     // a generic line for the undrivable types.
                     ProviderType.openAIResponses -> R.string.add_provider_subtitle_openai
-                    ProviderType.antigravity,
+                    ProviderType.antigravity -> R.string.add_provider_subtitle_openai
                     ProviderType.unsupported -> R.string.add_provider_subtitle_openai
                 }
                 val (icon, iconColor) = providerIcon(type)
@@ -410,7 +411,7 @@ private fun apiKeyDescription(type: ProviderType): String = when (type) {
     // only); present because this helper is total over the enum.
     ProviderType.githubCopilot -> "GitHub Copilot requires signing in with GitHub"
     ProviderType.openAIResponses -> "Supports the OpenAI Responses API and compatible endpoints"
-    ProviderType.antigravity,
+    ProviderType.antigravity -> "Sign in with Google to use your Antigravity models"
     ProviderType.unsupported -> "This provider type is not supported on Android"
 }
 
@@ -423,7 +424,7 @@ private fun oauthDescription(type: ProviderType): String = when (type) {
     ProviderType.kimiCode -> "Sign in with your Kimi account (Coding Plan)"
     ProviderType.githubCopilot -> "Sign in with GitHub (requires a Copilot subscription)"
     ProviderType.openAIResponses -> "Sign in with OpenAI Codex"
-    ProviderType.antigravity,
+    ProviderType.antigravity -> "Sign in with Google to use your Antigravity models"
     ProviderType.unsupported -> "This provider type is not supported on Android"
 }
 
@@ -554,7 +555,7 @@ private fun ColumnScope.ApiKeyConfigSection(
         // Unreachable: Copilot offers no API-key credential.
         ProviderType.githubCopilot -> ""
         ProviderType.openAIResponses -> "sk-..."
-        ProviderType.antigravity,
+        ProviderType.antigravity -> "Google sign-in only"
         ProviderType.unsupported -> "API Key..."
     }
     SettingsSection(
@@ -733,7 +734,7 @@ private fun ColumnScope.OAuthConfigSection(
         ProviderType.kimiCode -> "Sign in with Kimi Code"
         ProviderType.githubCopilot -> "Sign in with GitHub"
         ProviderType.openAIResponses -> "Sign in with OpenAI"
-        ProviderType.antigravity,
+        ProviderType.antigravity -> "Sign in with Google"
         ProviderType.unsupported -> "Sign in"
     }
 
@@ -1039,7 +1040,7 @@ private fun ColumnScope.OAuthConfigSection(
             // /models both hang directly off it.
             ProviderType.githubCopilot -> com.openminis.app.auth.CopilotDeviceFlow.API_BASE
             ProviderType.openAIResponses -> "https://api.openai.com"
-            ProviderType.antigravity,
+            ProviderType.antigravity -> ""
             ProviderType.unsupported -> ""
         }
         SettingsSection(
