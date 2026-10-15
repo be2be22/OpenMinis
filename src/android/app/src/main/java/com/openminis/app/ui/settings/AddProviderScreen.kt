@@ -785,6 +785,26 @@ private fun ColumnScope.OAuthConfigSection(
         )
     }
 
+    // Antigravity: sign-in needs a configured client id. Say so plainly instead of
+    // opening a browser that cannot complete.
+    if (providerType == ProviderType.antigravity &&
+        !com.openminis.app.auth.AntigravityOAuthManager(context, pendingInstanceId).isConfigured
+    ) {
+        SettingsSection(
+            header = "Google sign-in is not set up",
+            footer = "This build has no Google OAuth client for Antigravity. Set ANTIGRAVITY_OAUTH_CLIENT_ID in app/provider-customization.properties and rebuild.",
+        ) {
+            SettingsCardBlock {
+                Text(
+                    "Sign-in is unavailable until the client id is configured.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+    }
+
     if (isAuthenticated) {
         // ── Authenticated state — Token + Save ─────────────────────────
         //
@@ -820,6 +840,19 @@ private fun ColumnScope.OAuthConfigSection(
                     Text(
                         maskedToken!!,
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (providerType == ProviderType.antigravity) {
+                    // Account status from the stored sign-in only: no network call to render this card.
+                    val antigravityAccount = remember(pendingInstanceId, isAuthenticated) {
+                        com.openminis.app.auth.AntigravityOAuthManager(context, pendingInstanceId).email
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (antigravityAccount.isNullOrBlank()) "Signed in with Google"
+                        else "Signed in as $antigravityAccount",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

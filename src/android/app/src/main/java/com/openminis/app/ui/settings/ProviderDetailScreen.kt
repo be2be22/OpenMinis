@@ -1035,7 +1035,12 @@ private fun OAuthCredentialBlock(
                 // and validAccessToken() silently re-minted an access token —
                 // the user stayed effectively logged in. Then flip local state so
                 // the UI swaps to the Sign In button immediately.
-                com.openminis.app.auth.OAuthManager.forInstance(context, instance)?.logout()
+                val signOutManager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
+                if (signOutManager is com.openminis.app.auth.AntigravityOAuthManager) {
+                    signOutManager.signOut()
+                } else {
+                    signOutManager?.logout()
+                }
                 providerRepository.deleteApiKey(instance.id)
                 displayedKey = ""
                 needsReauth = false
